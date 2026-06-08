@@ -12,7 +12,7 @@ export const FileInputSchema = z.object({
 
 export const MigrateRequestSchema = z
   .object({
-    files: z.array(FileInputSchema).min(1).max(10),
+    files: z.array(FileInputSchema).min(1).max(25),
     sourceFramework: z.enum(frameworkIds),
     targetFramework: z.enum(frameworkIds),
     requireApproval: z.boolean().optional().default(false),
@@ -24,7 +24,7 @@ export const MigrateRequestSchema = z
   })
 
 export const ExecuteRequestSchema = z.object({
-  files: z.array(FileInputSchema).min(1).max(10),
+  files: z.array(FileInputSchema).min(1).max(25),
   sourceFramework: z.enum(frameworkIds),
   targetFramework: z.enum(frameworkIds),
   analysis: z.unknown(), // validated downstream by AnalysisResultSchema

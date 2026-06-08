@@ -50,9 +50,9 @@ describe('MigrateRequestSchema', () => {
     expect(r.success).toBe(false)
   })
 
-  it('rejects more than 10 files', () => {
+  it('rejects more than 25 files', () => {
     const r = MigrateRequestSchema.safeParse({
-      files: Array.from({ length: 11 }, (_, i) => ({ name: `f${i}.ts`, code: 'x' })),
+      files: Array.from({ length: 26 }, (_, i) => ({ name: `f${i}.ts`, code: 'x' })),
       sourceFramework: 'express',
       targetFramework: 'fastify',
     })

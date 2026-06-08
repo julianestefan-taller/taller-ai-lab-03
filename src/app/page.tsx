@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type {
   MigrationResult,
   MigrationPlan,
@@ -11,6 +11,7 @@ import type {
 } from '@/lib/schemas'
 import type { Framework } from '@/lib/frameworks'
 import { lineDiff } from '@/lib/diff'
+import { scanWorkspace, skippedSummary, downloadMigratedZip } from '@/lib/workspace'
 
 // ---- Types ------------------------------------------------------------------
 
@@ -18,6 +19,7 @@ interface FileEntry {
   id: string
   name: string
   code: string
+  lines: number
 }
 
 type Phase = 'analysis' | 'planning' | 'execution' | 'verification'
@@ -46,6 +48,10 @@ function uid() {
   return Math.random().toString(36).slice(2)
 }
 
+function countLines(code: string) {
+  return code ? code.split('\n').length : 0
+}
+
 const PHASE_LABELS: Record<Phase, string> = {
   analysis: 'Analysis',
   planning: 'Planning',
@@ -70,6 +76,8 @@ const STATUS_DOT: Record<StepStatus, string> = {
   failed: 'bg-red-400',
   skipped: 'bg-slate-700',
 }
+
+const MAX_FILES = 25
 
 // ---- Sub-components ---------------------------------------------------------
 
@@ -121,6 +129,8 @@ function StepList({ steps }: { steps: StepState[] }) {
 function DiffView({ file }: { file: MigratedFile }) {
   const [open, setOpen] = useState(false)
   const lines = lineDiff(file.originalCode, file.migratedCode)
+  const added = lines.filter((l) => l.type === 'added').length
+  const removed = lines.filter((l) => l.type === 'removed').length
 
   return (
     <div className="rounded-xl border border-white/10 overflow-hidden">
@@ -129,8 +139,12 @@ function DiffView({ file }: { file: MigratedFile }) {
         onClick={() => setOpen((v) => !v)}
         className="w-full flex items-center justify-between px-4 py-2 bg-white/5 hover:bg-white/8 text-sm text-slate-300 transition-colors"
       >
-        <span className="font-mono font-medium">{file.name}</span>
-        <span className="text-slate-500 text-xs">{open ? '▲ hide diff' : '▼ show diff'}</span>
+        <span className="font-mono font-medium truncate">{file.name}</span>
+        <div className="flex items-center gap-3 shrink-0 ml-3">
+          {added > 0 && <span className="text-green-400 text-xs">+{added}</span>}
+          {removed > 0 && <span className="text-red-400 text-xs">−{removed}</span>}
+          <span className="text-slate-500 text-xs">{open ? '▲' : '▼'}</span>
+        </div>
       </button>
       {open && (
         <div className="font-mono text-xs overflow-x-auto max-h-96 overflow-y-auto">
@@ -141,11 +155,11 @@ function DiffView({ file }: { file: MigratedFile }) {
                 l.type === 'added'
                   ? 'bg-green-900/30 text-green-300'
                   : l.type === 'removed'
-                    ? 'bg-red-900/30 text-red-300 line-through'
-                    : 'text-slate-500'
+                    ? 'bg-red-900/30 text-red-400 line-through'
+                    : 'text-slate-600'
               }
             >
-              <span className="select-none px-2 text-slate-600 border-r border-white/5 inline-block w-6 text-right mr-2">
+              <span className="select-none px-2 text-slate-700 border-r border-white/5 inline-block w-6 text-right mr-2">
                 {l.type === 'added' ? '+' : l.type === 'removed' ? '-' : ' '}
               </span>
               <span className="whitespace-pre">{l.content}</span>
@@ -166,8 +180,6 @@ function PlanViewer({
   onApprove: (plan: MigrationPlan) => void
   onReject: () => void
 }) {
-  const [editedPlan, setEditedPlan] = useState(plan)
-
   return (
     <div className="rounded-2xl bg-white/5 border border-indigo-500/30 p-5 space-y-4">
       <div className="flex items-center justify-between">
@@ -177,7 +189,7 @@ function PlanViewer({
         </span>
       </div>
       <div className="space-y-2">
-        {editedPlan.steps.map((step) => (
+        {plan.steps.map((step) => (
           <div key={step.id} className="rounded-lg bg-white/5 border border-white/10 p-3 space-y-1">
             <div className="flex items-center gap-2">
               <span className="text-xs text-slate-500 font-mono">#{step.id}</span>
@@ -201,10 +213,10 @@ function PlanViewer({
           </div>
         ))}
       </div>
-      {editedPlan.notes.length > 0 && (
+      {plan.notes.length > 0 && (
         <div className="text-xs text-slate-400 space-y-1">
           <p className="font-medium text-slate-300">Notes</p>
-          {editedPlan.notes.map((n, i) => (
+          {plan.notes.map((n, i) => (
             <p key={i}>• {n}</p>
           ))}
         </div>
@@ -212,7 +224,7 @@ function PlanViewer({
       <div className="flex gap-3 pt-2">
         <button
           type="button"
-          onClick={() => onApprove(editedPlan)}
+          onClick={() => onApprove(plan)}
           className="flex-1 py-2 rounded-xl bg-green-700 hover:bg-green-600 text-white font-semibold text-sm transition-colors"
         >
           Approve & Execute
@@ -225,8 +237,40 @@ function PlanViewer({
           Cancel
         </button>
       </div>
-      {/* suppress unused setter lint */}
-      <input type="hidden" onChange={() => setEditedPlan(editedPlan)} />
+    </div>
+  )
+}
+
+// Compact file list — shown when files come from a folder upload
+function CompactFileList({
+  files,
+  onRemove,
+}: {
+  files: FileEntry[]
+  onRemove: (id: string) => void
+}) {
+  return (
+    <div className="rounded-2xl bg-white/5 border border-white/10 overflow-hidden">
+      <div className="px-4 py-2 bg-white/5 border-b border-white/10 flex items-center justify-between">
+        <span className="text-sm text-slate-300 font-medium">{files.length} files loaded</span>
+        <span className="text-xs text-slate-500">editing disabled in workspace mode</span>
+      </div>
+      <div className="max-h-56 overflow-y-auto divide-y divide-white/5">
+        {files.map((f) => (
+          <div key={f.id} className="flex items-center gap-3 px-4 py-2 hover:bg-white/5 group">
+            <span className="font-mono text-xs text-slate-300 flex-1 truncate">{f.name}</span>
+            <span className="text-xs text-slate-600 shrink-0">{f.lines} lines</span>
+            <button
+              type="button"
+              onClick={() => onRemove(f.id)}
+              className="text-slate-700 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 shrink-0"
+              title="Remove file"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }
@@ -235,11 +279,15 @@ function PlanViewer({
 
 export default function Home() {
   const [frameworks, setFrameworks] = useState<Framework[]>([])
-  const [files, setFiles] = useState<FileEntry[]>([{ id: uid(), name: 'app.ts', code: '' }])
+  const [files, setFiles] = useState<FileEntry[]>([{ id: uid(), name: 'app.ts', code: '', lines: 0 }])
   const [sourceId, setSourceId] = useState('')
   const [targetId, setTargetId] = useState('')
   const [requireApproval, setRequireApproval] = useState(false)
   const [appState, setAppState] = useState<AppState>({ kind: 'idle' })
+  const [scanNote, setScanNote] = useState<string | null>(null)
+  const [isWorkspaceMode, setIsWorkspaceMode] = useState(false)
+
+  const folderInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     fetch('/api/frameworks')
@@ -254,17 +302,78 @@ export default function Home() {
       .catch(() => {})
   }, [])
 
+  // ---- File management
+
   function addFile() {
-    setFiles((prev) => [...prev, { id: uid(), name: 'file.ts', code: '' }])
+    setFiles((prev) => [...prev, { id: uid(), name: 'file.ts', code: '', lines: 0 }])
   }
 
   function removeFile(id: string) {
-    setFiles((prev) => prev.filter((f) => f.id !== id))
+    setFiles((prev) => {
+      const next = prev.filter((f) => f.id !== id)
+      if (next.length === 0) {
+        setIsWorkspaceMode(false)
+        return [{ id: uid(), name: 'app.ts', code: '', lines: 0 }]
+      }
+      return next
+    })
   }
 
   function updateFile(id: string, patch: Partial<Omit<FileEntry, 'id'>>) {
-    setFiles((prev) => prev.map((f) => (f.id === id ? { ...f, ...patch } : f)))
+    setFiles((prev) =>
+      prev.map((f) =>
+        f.id === id
+          ? { ...f, ...patch, lines: countLines(patch.code ?? f.code) }
+          : f
+      )
+    )
   }
+
+  function clearAll() {
+    setFiles([{ id: uid(), name: 'app.ts', code: '', lines: 0 }])
+    setIsWorkspaceMode(false)
+    setScanNote(null)
+    setAppState({ kind: 'idle' })
+  }
+
+  // ---- Folder upload
+
+  async function handleFolderUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const fileList = e.target.files
+    if (!fileList || fileList.length === 0) return
+
+    const { files: scanned, skipped } = await scanWorkspace(fileList)
+
+    if (scanned.length === 0) {
+      setScanNote('No eligible code files found in the selected folder.')
+      return
+    }
+
+    // Cap at MAX_FILES, keeping the first ones alphabetically
+    const kept = scanned.slice(0, MAX_FILES)
+    const capped = scanned.length > MAX_FILES ? scanned.length - MAX_FILES : 0
+
+    const entries: FileEntry[] = kept.map((f) => ({
+      id: uid(),
+      name: f.name,
+      code: f.code,
+      lines: f.lines,
+    }))
+
+    setFiles(entries)
+    setIsWorkspaceMode(true)
+
+    const skipSummary = skippedSummary(skipped)
+    const parts: string[] = [`${kept.length} files loaded`]
+    if (capped > 0) parts.push(`${capped} more capped at ${MAX_FILES} limit`)
+    if (skipSummary) parts.push(skipSummary)
+    setScanNote(parts.join(' · '))
+
+    // Reset input so the same folder can be re-selected
+    e.target.value = ''
+  }
+
+  // ---- Agent state helpers
 
   function initPhases(): Record<Phase, PhaseState> {
     return {
@@ -295,7 +404,6 @@ export default function Home() {
   async function handleApprove(plan: MigrationPlan) {
     if (appState.kind !== 'awaiting_approval') return
     const { analysis } = appState
-
     const nonEmpty = files.filter((f) => f.code.trim())
     const phases = initPhases()
     phases.analysis.status = 'done'
@@ -340,15 +448,12 @@ export default function Home() {
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
         buffer = lines.pop() ?? ''
-
         for (const line of lines) {
           if (!line.trim()) continue
           try {
             const event = JSON.parse(line) as AgentEvent
             handleEvent(event)
-          } catch {
-            // skip malformed line
-          }
+          } catch { /* skip malformed line */ }
         }
       }
     } catch (err) {
@@ -364,36 +469,23 @@ export default function Home() {
         phases[event.phase] = { status: event.status === 'started' ? 'running' : 'done' }
         return { ...prev, phases, currentPhase: event.phase }
       }
-
       if (event.type === 'step') {
         if (prev.kind !== 'running') return prev
         const existing = prev.steps.find((s) => s.id === event.stepId)
         if (existing) {
-          return {
-            ...prev,
-            steps: prev.steps.map((s) =>
-              s.id === event.stepId ? { ...s, status: event.status } : s
-            ),
-          }
+          return { ...prev, steps: prev.steps.map((s) => s.id === event.stepId ? { ...s, status: event.status } : s) }
         }
-        return {
-          ...prev,
-          steps: [...prev.steps, { id: event.stepId, title: event.title, status: event.status }],
-        }
+        return { ...prev, steps: [...prev.steps, { id: event.stepId, title: event.title, status: event.status }] }
       }
-
       if (event.type === 'awaiting_approval') {
         return { kind: 'awaiting_approval', analysis: event.analysis, plan: event.plan }
       }
-
       if (event.type === 'result') {
         return { kind: 'done', result: event.result }
       }
-
       if (event.type === 'error') {
         return { kind: 'error', message: event.message }
       }
-
       return prev
     })
   }
@@ -408,11 +500,12 @@ export default function Home() {
         {/* Header */}
         <div className="text-center">
           <h1 className="text-4xl font-bold text-white mb-2">Migration Agent</h1>
-          <p className="text-slate-400">AI-powered code migration between frameworks — Analysis → Planning → Execution → Verification</p>
+          <p className="text-slate-400">AI-powered code migration — Analysis → Planning → Execution → Verification</p>
         </div>
 
         {/* Input form */}
         <form onSubmit={handleSubmit} className="space-y-4">
+
           {/* Framework selectors */}
           <div className="grid grid-cols-2 gap-4">
             <div className="rounded-xl bg-white/5 border border-white/10 p-4">
@@ -424,9 +517,7 @@ export default function Home() {
               >
                 <option value="">Select source…</option>
                 {frameworks.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.label} ({f.language})
-                  </option>
+                  <option key={f.id} value={f.id}>{f.label} ({f.language})</option>
                 ))}
               </select>
             </div>
@@ -438,52 +529,58 @@ export default function Home() {
                 className="w-full bg-slate-800 border border-white/10 text-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
               >
                 <option value="">Select target…</option>
-                {frameworks
-                  .filter((f) => f.id !== sourceId)
-                  .map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.label} ({f.language})
-                    </option>
-                  ))}
+                {frameworks.filter((f) => f.id !== sourceId).map((f) => (
+                  <option key={f.id} value={f.id}>{f.label} ({f.language})</option>
+                ))}
               </select>
             </div>
           </div>
 
-          {/* File editor */}
-          {files.map((file, idx) => (
-            <div key={file.id} className="rounded-2xl bg-white/5 border border-white/10 overflow-hidden">
-              <div className="flex items-center gap-2 px-4 py-2 bg-white/5 border-b border-white/10">
-                <input
-                  type="text"
-                  value={file.name}
-                  onChange={(e) => updateFile(file.id, { name: e.target.value })}
-                  placeholder="filename.ts"
-                  className="flex-1 bg-transparent text-sm text-slate-300 placeholder-slate-600 focus:outline-none font-mono"
+          {/* File input area */}
+          {isWorkspaceMode ? (
+            <CompactFileList files={files} onRemove={removeFile} />
+          ) : (
+            files.map((file, idx) => (
+              <div key={file.id} className="rounded-2xl bg-white/5 border border-white/10 overflow-hidden">
+                <div className="flex items-center gap-2 px-4 py-2 bg-white/5 border-b border-white/10">
+                  <input
+                    type="text"
+                    value={file.name}
+                    onChange={(e) => updateFile(file.id, { name: e.target.value })}
+                    placeholder="filename.ts"
+                    className="flex-1 bg-transparent text-sm text-slate-300 placeholder-slate-600 focus:outline-none font-mono"
+                  />
+                  {files.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => removeFile(file.id)}
+                      className="text-slate-600 hover:text-red-400 transition-colors text-lg leading-none"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+                <textarea
+                  value={file.code}
+                  onChange={(e) => updateFile(file.id, { code: e.target.value })}
+                  placeholder={`Paste ${idx === 0 ? 'your' : 'another'} source code here…`}
+                  rows={10}
+                  className="w-full bg-transparent text-sm text-slate-200 placeholder-slate-700 font-mono p-4 focus:outline-none resize-y"
+                  spellCheck={false}
                 />
-                {files.length > 1 && (
-                  <button
-                    type="button"
-                    onClick={() => removeFile(file.id)}
-                    className="text-slate-600 hover:text-red-400 transition-colors text-lg leading-none"
-                  >
-                    ×
-                  </button>
-                )}
               </div>
-              <textarea
-                value={file.code}
-                onChange={(e) => updateFile(file.id, { code: e.target.value })}
-                placeholder={`Paste ${idx === 0 ? 'your' : 'another'} source code here…`}
-                rows={10}
-                className="w-full bg-transparent text-sm text-slate-200 placeholder-slate-700 font-mono p-4 focus:outline-none resize-y"
-                spellCheck={false}
-              />
-            </div>
-          ))}
+            ))
+          )}
+
+          {/* Scan note */}
+          {scanNote && (
+            <p className="text-xs text-slate-500 px-1">{scanNote}</p>
+          )}
 
           {/* Controls row */}
           <div className="flex items-center gap-3 flex-wrap">
-            {files.length < 10 && (
+            {/* Manual add-file — only in paste mode */}
+            {!isWorkspaceMode && files.length < MAX_FILES && (
               <button
                 type="button"
                 onClick={addFile}
@@ -492,6 +589,27 @@ export default function Home() {
                 + Add file
               </button>
             )}
+
+            {/* Folder upload */}
+            <button
+              type="button"
+              onClick={() => folderInputRef.current?.click()}
+              className="px-4 py-2.5 rounded-xl border border-white/20 text-slate-400 hover:text-white hover:border-white/40 text-sm transition-colors flex items-center gap-2"
+            >
+              <span>↑</span> Upload folder
+            </button>
+
+            {/* Clear — shown when in workspace mode */}
+            {isWorkspaceMode && (
+              <button
+                type="button"
+                onClick={clearAll}
+                className="px-4 py-2.5 rounded-xl border border-red-500/20 text-red-400/70 hover:text-red-400 hover:border-red-500/40 text-sm transition-colors"
+              >
+                Clear
+              </button>
+            )}
+
             <label className="flex items-center gap-2 text-sm text-slate-400 cursor-pointer select-none ml-auto">
               <input
                 type="checkbox"
@@ -501,6 +619,7 @@ export default function Home() {
               />
               Require plan approval
             </label>
+
             <button
               type="submit"
               disabled={isRunning || !canSubmit}
@@ -514,12 +633,21 @@ export default function Home() {
                   </svg>
                   Migrating…
                 </>
-              ) : (
-                'Migrate'
-              )}
+              ) : 'Migrate'}
             </button>
           </div>
         </form>
+
+        {/* Hidden folder input */}
+        <input
+          ref={folderInputRef}
+          type="file"
+          // @ts-expect-error — webkitdirectory is not in the standard types
+          webkitdirectory=""
+          multiple
+          className="hidden"
+          onChange={handleFolderUpload}
+        />
 
         {/* Live progress */}
         {appState.kind === 'running' && (
@@ -531,11 +659,7 @@ export default function Home() {
 
         {/* Awaiting approval */}
         {appState.kind === 'awaiting_approval' && (
-          <PlanViewer
-            plan={appState.plan}
-            onApprove={handleApprove}
-            onReject={handleReject}
-          />
+          <PlanViewer plan={appState.plan} onApprove={handleApprove} onReject={handleReject} />
         )}
 
         {/* Error */}
@@ -548,20 +672,39 @@ export default function Home() {
         {/* Results */}
         {appState.kind === 'done' && (
           <div className="space-y-6">
-            {/* Summary */}
+
+            {/* Summary + download */}
             <div className="rounded-2xl bg-white/5 border border-white/10 p-5">
-              <div className="flex items-center justify-between mb-3">
-                <h2 className="text-lg font-semibold text-white">Migration Result</h2>
-                <span
-                  className={`text-xs rounded px-2 py-0.5 border font-medium ${
+              <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-lg font-semibold text-white">Migration Result</h2>
+                  <span className={`text-xs rounded px-2 py-0.5 border font-medium ${
                     appState.result.success
                       ? 'bg-green-900/40 text-green-300 border-green-700/40'
                       : 'bg-red-900/40 text-red-300 border-red-700/40'
-                  }`}
-                >
-                  {appState.result.success ? 'success' : 'failed'}
-                </span>
+                  }`}>
+                    {appState.result.success ? 'success' : 'failed'}
+                  </span>
+                </div>
+
+                {/* ZIP download — shown when there are migrated files */}
+                {appState.result.migratedFiles.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      downloadMigratedZip(
+                        appState.result.migratedFiles,
+                        `migrated-${targetId}.zip`
+                      )
+                    }
+                    className="px-4 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-medium transition-colors flex items-center gap-2"
+                  >
+                    <span>↓</span>
+                    Download .zip ({appState.result.migratedFiles.length} files)
+                  </button>
+                )}
               </div>
+
               {appState.result.rolledBack && (
                 <p className="text-sm text-yellow-300 mb-3">
                   ⚠ Migration was rolled back due to step failure.
@@ -575,7 +718,13 @@ export default function Home() {
             {/* Plan steps */}
             <div>
               <h2 className="text-base font-semibold text-white mb-3">Executed Plan</h2>
-              <StepList steps={appState.result.plan.steps.map((s) => ({ id: s.id, title: s.title, status: s.status }))} />
+              <StepList
+                steps={appState.result.plan.steps.map((s) => ({
+                  id: s.id,
+                  title: s.title,
+                  status: s.status,
+                }))}
+              />
             </div>
 
             {/* Verification checks */}
@@ -616,7 +765,10 @@ export default function Home() {
             {/* Migrated files with diff */}
             {appState.result.migratedFiles.length > 0 && (
               <div>
-                <h2 className="text-base font-semibold text-white mb-3">Migrated Files</h2>
+                <h2 className="text-base font-semibold text-white mb-3">
+                  Migrated Files
+                  <span className="ml-2 text-sm text-slate-500 font-normal">(click to expand diff)</span>
+                </h2>
                 <div className="space-y-2">
                   {appState.result.migratedFiles.map((f, i) => (
                     <DiffView key={i} file={f} />
@@ -630,9 +782,7 @@ export default function Home() {
               <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4">
                 <h2 className="text-sm font-semibold text-red-300 mb-2">Errors</h2>
                 {appState.result.errors.map((e, i) => (
-                  <p key={i} className="text-xs text-red-400 font-mono">
-                    {e}
-                  </p>
+                  <p key={i} className="text-xs text-red-400 font-mono">{e}</p>
                 ))}
               </div>
             )}
