@@ -1,46 +1,16 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import type {
-  MigrationResult,
-  MigrationPlan,
-  AnalysisResult,
-  AgentEvent,
-  StepStatus,
-  MigratedFile,
-} from '@/lib/schemas'
+import type { MigrationPlan, AgentEvent } from '@/lib/schemas'
 import type { Framework } from '@/lib/frameworks'
-import { lineDiff } from '@/lib/diff'
-import { scanWorkspace, skippedSummary, downloadMigratedZip } from '@/lib/workspace'
-
-// ---- Types ------------------------------------------------------------------
-
-interface FileEntry {
-  id: string
-  name: string
-  code: string
-  lines: number
-}
-
-type Phase = 'analysis' | 'planning' | 'execution' | 'verification'
-type PhaseStatus = 'idle' | 'running' | 'done' | 'error'
-
-interface PhaseState {
-  status: PhaseStatus
-}
-
-interface StepState {
-  id: number
-  title: string
-  status: StepStatus
-}
-
-type AppState =
-  | { kind: 'idle' }
-  | { kind: 'running'; phases: Record<Phase, PhaseState>; steps: StepState[]; currentPhase: Phase }
-  | { kind: 'awaiting_approval'; analysis: AnalysisResult; plan: MigrationPlan }
-  | { kind: 'done'; result: MigrationResult }
-  | { kind: 'error'; message: string }
+import { scanWorkspace, skippedSummary } from '@/lib/workspace'
+import { PhaseTracker } from './components/PhaseTracker'
+import { StepList } from './components/StepList'
+import { PlanViewer } from './components/PlanViewer'
+import { CompactFileList } from './components/CompactFileList'
+import { FrameworkSelectors } from './components/FrameworkSelectors'
+import { MigrationResult } from './components/MigrationResult'
+import type { FileEntry, Phase, PhaseState, AppState } from './components/types'
 
 // ---- Helpers ----------------------------------------------------------------
 
@@ -52,228 +22,7 @@ function countLines(code: string) {
   return code ? code.split('\n').length : 0
 }
 
-const PHASE_LABELS: Record<Phase, string> = {
-  analysis: 'Analysis',
-  planning: 'Planning',
-  execution: 'Execution',
-  verification: 'Verification',
-}
-
-const PHASES: Phase[] = ['analysis', 'planning', 'execution', 'verification']
-
-const STATUS_COLORS: Record<StepStatus, string> = {
-  pending: 'text-slate-500',
-  in_progress: 'text-yellow-400',
-  completed: 'text-green-400',
-  failed: 'text-red-400',
-  skipped: 'text-slate-600',
-}
-
-const STATUS_DOT: Record<StepStatus, string> = {
-  pending: 'bg-slate-600',
-  in_progress: 'bg-yellow-400 animate-pulse',
-  completed: 'bg-green-400',
-  failed: 'bg-red-400',
-  skipped: 'bg-slate-700',
-}
-
 const MAX_FILES = 25
-
-// ---- Sub-components ---------------------------------------------------------
-
-function PhaseTracker({ phases, current }: { phases: Record<Phase, PhaseState>; current: Phase }) {
-  return (
-    <div className="flex items-center gap-1 text-xs flex-wrap">
-      {PHASES.map((p, i) => {
-        const st = phases[p].status
-        return (
-          <div key={p} className="flex items-center gap-1">
-            <span
-              className={
-                st === 'done'
-                  ? 'text-green-400'
-                  : st === 'running'
-                    ? 'text-yellow-400 animate-pulse'
-                    : st === 'error'
-                      ? 'text-red-400'
-                      : p === current
-                        ? 'text-indigo-400'
-                        : 'text-slate-600'
-              }
-            >
-              {PHASE_LABELS[p]}
-            </span>
-            {i < PHASES.length - 1 && <span className="text-slate-700">→</span>}
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
-function StepList({ steps }: { steps: StepState[] }) {
-  if (steps.length === 0) return null
-  return (
-    <div className="space-y-1.5 mt-3">
-      {steps.map((s) => (
-        <div key={s.id} className="flex items-center gap-2 text-sm">
-          <span className={`h-2 w-2 rounded-full shrink-0 ${STATUS_DOT[s.status]}`} />
-          <span className={`flex-1 ${STATUS_COLORS[s.status]}`}>{s.title}</span>
-          <span className="text-xs text-slate-600 uppercase">{s.status.replace('_', ' ')}</span>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-function DiffView({ file }: { file: MigratedFile }) {
-  const [open, setOpen] = useState(false)
-  const lines = lineDiff(file.originalCode, file.migratedCode)
-  const added = lines.filter((l) => l.type === 'added').length
-  const removed = lines.filter((l) => l.type === 'removed').length
-
-  return (
-    <div className="rounded-xl border border-white/10 overflow-hidden">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between px-4 py-2 bg-white/5 hover:bg-white/8 text-sm text-slate-300 transition-colors"
-      >
-        <span className="font-mono font-medium truncate">{file.name}</span>
-        <div className="flex items-center gap-3 shrink-0 ml-3">
-          {added > 0 && <span className="text-green-400 text-xs">+{added}</span>}
-          {removed > 0 && <span className="text-red-400 text-xs">−{removed}</span>}
-          <span className="text-slate-500 text-xs">{open ? '▲' : '▼'}</span>
-        </div>
-      </button>
-      {open && (
-        <div className="font-mono text-xs overflow-x-auto max-h-96 overflow-y-auto">
-          {lines.map((l, i) => (
-            <div
-              key={i}
-              className={
-                l.type === 'added'
-                  ? 'bg-green-900/30 text-green-300'
-                  : l.type === 'removed'
-                    ? 'bg-red-900/30 text-red-400 line-through'
-                    : 'text-slate-600'
-              }
-            >
-              <span className="select-none px-2 text-slate-700 border-r border-white/5 inline-block w-6 text-right mr-2">
-                {l.type === 'added' ? '+' : l.type === 'removed' ? '-' : ' '}
-              </span>
-              <span className="whitespace-pre">{l.content}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function PlanViewer({
-  plan,
-  onApprove,
-  onReject,
-}: {
-  plan: MigrationPlan
-  onApprove: (plan: MigrationPlan) => void
-  onReject: () => void
-}) {
-  return (
-    <div className="rounded-2xl bg-white/5 border border-indigo-500/30 p-5 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-white">Review Migration Plan</h2>
-        <span className="text-xs text-indigo-300 bg-indigo-900/40 border border-indigo-700/40 rounded px-2 py-0.5">
-          awaiting approval
-        </span>
-      </div>
-      <div className="space-y-2">
-        {plan.steps.map((step) => (
-          <div key={step.id} className="rounded-lg bg-white/5 border border-white/10 p-3 space-y-1">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-500 font-mono">#{step.id}</span>
-              <span className="text-sm font-medium text-white">{step.title}</span>
-              <span
-                className={`ml-auto text-xs rounded px-1.5 py-0.5 ${
-                  step.complexity === 'high'
-                    ? 'bg-red-900/40 text-red-300'
-                    : step.complexity === 'medium'
-                      ? 'bg-yellow-900/40 text-yellow-300'
-                      : 'bg-green-900/40 text-green-300'
-                }`}
-              >
-                {step.complexity}
-              </span>
-            </div>
-            <p className="text-xs text-slate-400">{step.description}</p>
-            {step.dependsOn.length > 0 && (
-              <p className="text-xs text-slate-600">depends on: #{step.dependsOn.join(', #')}</p>
-            )}
-          </div>
-        ))}
-      </div>
-      {plan.notes.length > 0 && (
-        <div className="text-xs text-slate-400 space-y-1">
-          <p className="font-medium text-slate-300">Notes</p>
-          {plan.notes.map((n, i) => (
-            <p key={i}>• {n}</p>
-          ))}
-        </div>
-      )}
-      <div className="flex gap-3 pt-2">
-        <button
-          type="button"
-          onClick={() => onApprove(plan)}
-          className="flex-1 py-2 rounded-xl bg-green-700 hover:bg-green-600 text-white font-semibold text-sm transition-colors"
-        >
-          Approve & Execute
-        </button>
-        <button
-          type="button"
-          onClick={onReject}
-          className="px-5 py-2 rounded-xl border border-white/20 text-slate-400 hover:text-white hover:border-white/40 text-sm transition-colors"
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  )
-}
-
-// Compact file list — shown when files come from a folder upload
-function CompactFileList({
-  files,
-  onRemove,
-}: {
-  files: FileEntry[]
-  onRemove: (id: string) => void
-}) {
-  return (
-    <div className="rounded-2xl bg-white/5 border border-white/10 overflow-hidden">
-      <div className="px-4 py-2 bg-white/5 border-b border-white/10 flex items-center justify-between">
-        <span className="text-sm text-slate-300 font-medium">{files.length} files loaded</span>
-        <span className="text-xs text-slate-500">editing disabled in workspace mode</span>
-      </div>
-      <div className="max-h-56 overflow-y-auto divide-y divide-white/5">
-        {files.map((f) => (
-          <div key={f.id} className="flex items-center gap-3 px-4 py-2 hover:bg-white/5 group">
-            <span className="font-mono text-xs text-slate-300 flex-1 truncate">{f.name}</span>
-            <span className="text-xs text-slate-600 shrink-0">{f.lines} lines</span>
-            <button
-              type="button"
-              onClick={() => onRemove(f.id)}
-              className="text-slate-700 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 shrink-0"
-              title="Remove file"
-            >
-              ×
-            </button>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
 
 // ---- Main page --------------------------------------------------------------
 
@@ -506,35 +255,13 @@ export default function Home() {
         {/* Input form */}
         <form onSubmit={handleSubmit} className="space-y-4">
 
-          {/* Framework selectors */}
-          <div className="grid grid-cols-2 gap-4">
-            <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-              <label className="block text-xs text-slate-400 mb-2">Source Framework</label>
-              <select
-                value={sourceId}
-                onChange={(e) => setSourceId(e.target.value)}
-                className="w-full bg-slate-800 border border-white/10 text-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              >
-                <option value="">Select source…</option>
-                {frameworks.map((f) => (
-                  <option key={f.id} value={f.id}>{f.label} ({f.language})</option>
-                ))}
-              </select>
-            </div>
-            <div className="rounded-xl bg-white/5 border border-white/10 p-4">
-              <label className="block text-xs text-slate-400 mb-2">Target Framework</label>
-              <select
-                value={targetId}
-                onChange={(e) => setTargetId(e.target.value)}
-                className="w-full bg-slate-800 border border-white/10 text-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              >
-                <option value="">Select target…</option>
-                {frameworks.filter((f) => f.id !== sourceId).map((f) => (
-                  <option key={f.id} value={f.id}>{f.label} ({f.language})</option>
-                ))}
-              </select>
-            </div>
-          </div>
+          <FrameworkSelectors
+            frameworks={frameworks}
+            sourceId={sourceId}
+            targetId={targetId}
+            onSourceChange={setSourceId}
+            onTargetChange={setTargetId}
+          />
 
           {/* File input area */}
           {isWorkspaceMode ? (
@@ -671,130 +398,11 @@ export default function Home() {
 
         {/* Results */}
         {appState.kind === 'done' && (
-          <div className="space-y-6">
-
-            {/* Summary + download */}
-            <div className="rounded-2xl bg-white/5 border border-white/10 p-5">
-              <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
-                <div className="flex items-center gap-3">
-                  <h2 className="text-lg font-semibold text-white">Migration Result</h2>
-                  <span className={`text-xs rounded px-2 py-0.5 border font-medium ${
-                    appState.result.success
-                      ? 'bg-green-900/40 text-green-300 border-green-700/40'
-                      : 'bg-red-900/40 text-red-300 border-red-700/40'
-                  }`}>
-                    {appState.result.success ? 'success' : 'failed'}
-                  </span>
-                </div>
-
-                {/* ZIP download — shown when there are migrated files */}
-                {appState.result.migratedFiles.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() =>
-                      downloadMigratedZip(
-                        appState.result.migratedFiles,
-                        `migrated-${targetId}.zip`
-                      )
-                    }
-                    className="px-4 py-1.5 rounded-lg bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-medium transition-colors flex items-center gap-2"
-                  >
-                    <span>↓</span>
-                    Download .zip ({appState.result.migratedFiles.length} files)
-                  </button>
-                )}
-              </div>
-
-              {appState.result.rolledBack && (
-                <p className="text-sm text-yellow-300 mb-3">
-                  ⚠ Migration was rolled back due to step failure.
-                </p>
-              )}
-              <p className="text-slate-300 text-sm leading-relaxed">
-                {appState.result.verification.report}
-              </p>
-            </div>
-
-            {/* Plan steps */}
-            <div>
-              <h2 className="text-base font-semibold text-white mb-3">Executed Plan</h2>
-              <StepList
-                steps={appState.result.plan.steps.map((s) => ({
-                  id: s.id,
-                  title: s.title,
-                  status: s.status,
-                }))}
-              />
-            </div>
-
-            {/* Verification checks */}
-            {appState.result.verification.checks.length > 0 && (
-              <div className="rounded-2xl bg-white/5 border border-white/10 p-5">
-                <h2 className="text-base font-semibold text-white mb-3">Verification Checks</h2>
-                <div className="space-y-2">
-                  {appState.result.verification.checks.map((c, i) => (
-                    <div key={i} className="flex items-start gap-2 text-sm">
-                      <span className={c.passed ? 'text-green-400' : 'text-red-400'}>
-                        {c.passed ? '✓' : '✗'}
-                      </span>
-                      <div>
-                        <span className="text-slate-300 font-medium">{c.name}</span>
-                        <span className="text-slate-500 ml-2 text-xs">{c.detail}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Remaining issues */}
-            {appState.result.verification.remainingIssues.length > 0 && (
-              <div className="rounded-2xl bg-yellow-900/20 border border-yellow-500/20 p-5">
-                <h2 className="text-base font-semibold text-white mb-3">Remaining Issues</h2>
-                <ul className="space-y-1.5">
-                  {appState.result.verification.remainingIssues.map((issue, i) => (
-                    <li key={i} className="text-sm text-yellow-200 flex gap-2">
-                      <span className="text-yellow-400 shrink-0">!</span>
-                      {issue}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {/* Migrated files with diff */}
-            {appState.result.migratedFiles.length > 0 && (
-              <div>
-                <h2 className="text-base font-semibold text-white mb-3">
-                  Migrated Files
-                  <span className="ml-2 text-sm text-slate-500 font-normal">(click to expand diff)</span>
-                </h2>
-                <div className="space-y-2">
-                  {appState.result.migratedFiles.map((f, i) => (
-                    <DiffView key={i} file={f} />
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Errors */}
-            {appState.result.errors.length > 0 && (
-              <div className="rounded-xl bg-red-500/10 border border-red-500/30 p-4">
-                <h2 className="text-sm font-semibold text-red-300 mb-2">Errors</h2>
-                {appState.result.errors.map((e, i) => (
-                  <p key={i} className="text-xs text-red-400 font-mono">{e}</p>
-                ))}
-              </div>
-            )}
-
-            <button
-              type="button"
-              onClick={() => setAppState({ kind: 'idle' })}
-              className="px-6 py-2 rounded-xl border border-white/20 text-slate-400 hover:text-white hover:border-white/40 text-sm transition-colors"
-            >
-              Start new migration
-            </button>
-          </div>
+          <MigrationResult
+            result={appState.result}
+            targetId={targetId}
+            onReset={() => setAppState({ kind: 'idle' })}
+          />
         )}
       </div>
     </main>

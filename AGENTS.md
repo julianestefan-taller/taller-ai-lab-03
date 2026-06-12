@@ -64,9 +64,13 @@ Execution state (file snapshots for rollback, working copies) lives in plain `Ma
 | `src/lib/agent/orchestrator.ts` | Composes all 4 phases as async generators; approval gate logic |
 | `src/app/api/migrate/route.ts` | POST handler — validates, delegates to `runMigration`, streams or buffers |
 | `src/app/api/execute/route.ts` | POST handler — validates, re-validates `analysis` + `plan`, delegates to `resumeExecution` |
+| `src/app/page.tsx` | Client component — holds the `AppState` machine, stream loop, and handlers; composes the components below. |
+| `src/app/components/` | Presentational components: `PhaseTracker`, `StepList`, `DiffView`, `PlanViewer`, `CompactFileList` (moved verbatim), plus `FrameworkSelectors` and `MigrationResult`. Shared `constants.ts` (phase/status style maps) and `types.ts` (`FileEntry`, `Phase`, `AppState`, …). |
 
 ## Testing
 
 Tests use Vitest. The Gemini SDK (`src/lib/gemini.ts`) is mocked at module level in every agent test file using `vi.mock('../../gemini', ...)`. Route tests mock both the orchestrator and ndjson modules.
+
+Frontend component tests live in `src/app/components/__tests__/` and use `@testing-library/react` in jsdom (per-file `// @vitest-environment jsdom` docblock; node is the default environment).
 
 Run tests: `npm test`

@@ -11,12 +11,13 @@ vi.mock('@/lib/ndjson', () => ({
 
 import { resumeExecution } from '@/lib/agent/orchestrator'
 import { collectEvents } from '@/lib/ndjson'
+import type { AnalysisResult, MigrationPlan, MigrationResult } from '@/lib/schemas'
 import { POST } from '../route'
 
 const mockResumeExecution = vi.mocked(resumeExecution)
 const mockCollectEvents = vi.mocked(collectEvents)
 
-const validAnalysis = {
+const validAnalysis: AnalysisResult = {
   summary: 'ok',
   detectedPatterns: [],
   dependencies: [],
@@ -24,7 +25,7 @@ const validAnalysis = {
   filesOverview: [],
 }
 
-const validPlan = {
+const validPlan: MigrationPlan = {
   steps: [{ id: 0, title: 'T', description: 'D', dependsOn: [], complexity: 'low', targetFiles: [], status: 'pending' }],
   notes: [],
 }
@@ -45,7 +46,7 @@ function makeRequest(body: unknown) {
   })
 }
 
-const validResult = {
+const validResult: MigrationResult = {
   success: true,
   migratedFiles: [],
   plan: validPlan,
